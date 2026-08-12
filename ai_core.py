@@ -114,7 +114,55 @@ def edit_image_tool(image_path: str, instruction: str) -> str:
     return json.dumps({"success": True, "url": url}, ensure_ascii=False)
 
 
-skill_tools = [edit_image_tool]
+@tool(parse_docstring=True)
+def merge_image_tool(image_path_1: str, image_path_2: str, instruction: str) -> str:
+    """合并两张图片的工具
+
+    Args:
+        image_path_1 (str): 第一张图片路径
+        image_path_2 (str): 第二张图片路径
+        instruction (str): 用户的指令，描述如何合并这两张图片
+
+    Returns:
+        str: 合并后的图片URL
+    """
+    data_urls = []
+    for p in (image_path_1, image_path_2):
+        with open(p, "rb") as f:
+            image_bytes = f.read()
+
+        # 用 PIL 识别真实格式，避免声明 MIME 与内容不一致被模型以 url error 拒绝
+        detected = detect_image(image_bytes)
+        if detected is None:
+            return json.dumps({"success": False, "url": "", "message": f"{p} 不是有效的图片文件"}, ensure_ascii=False)
+
+        _, mime = detected
+        data_urls.append(build_data_url(image_bytes, mime))
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"image": data_urls[0]},
+                {"image": data_urls[1]},
+                {"text": instruction},
+            ],
+        }
+    ]
+    response = MultiModalConversation.call(
+        api_key=dashscope.api_key,
+        model="qwen-image-3.0",
+        messages=messages,
+        negative_prompt="低分辨率，低画质，肢体畸形，手指畸形，画面过饱和，蜡像感，人脸无细节，过度光滑，画面具有AI感。构图混乱。文字模糊，扭曲。",
+    )
+    rprint(f"qwen-image-3.0合并调用结果: {response}")
+    if response.status_code != 200:
+        return json.dumps({"success": False, "url": "", "message": str(response)}, ensure_ascii=False)
+    url = response['output']['choices'][0]['message']['content'][0]['image']
+    return json.dumps({"success": True, "url": url}, ensure_ascii=False)
+
+
+skill_tools = [edit_image_tool, merge_image_tool]
 
 skill_image_system_prompt = SystemMessage(
     content="你是一个智能图片处理助手，你需要根据用户的指令来调用工具处理图片，你暂时只能实现以下功能："
@@ -150,8 +198,9 @@ except Exception as e:
 
 
 # 调用 agent 处理图片
-def invoke_agent(instruction, p):
+def invoke_agent(instruction, image_paths):
     """调用 agent 处理图片，返回规范化的结果 dict {success, url, message}"""
+    paths_block = "\n".join(f"图片路径{i + 1}：{p}" for i, p in enumerate(image_paths))
     message_prompt_template = ChatPromptTemplate.from_template("""
     你是一个图片处理助手。请根据用户的指令处理图片。
     你必须**只输出**一个符合以下格式的 JSON 对象，不要添加任何额外文字：
@@ -163,10 +212,10 @@ def invoke_agent(instruction, p):
     }}
 
     用户指令：{instruction}
-    图片路径：{p}
+    {paths}
     """)
     message = [HumanMessage(
-        content=message_prompt_template.format(instruction=instruction, p=p)
+        content=message_prompt_template.format(instruction=instruction, paths=paths_block)
     )]
     state = skill_image_agent.invoke({
         "messages": message

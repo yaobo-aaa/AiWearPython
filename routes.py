@@ -30,11 +30,20 @@ def skill_image_api():
         if instruction is None or instruction == "":
             return jsonify({"code": 400, "success": False, "url": "", "message": "缺少 instruction 参数"}), 400
 
+        file1 = request.files.get("file1")
+        file2 = request.files.get("file2")
         file = request.files.get("file")
-        if file is None or file.filename == "":
-            return jsonify({"code": 400, "success": False, "url": "", "message": "缺少 file 参数"}), 400
 
-        result, code = services.skill_image(instruction, file.read())
+        if file1 is not None and file1.filename != "" and file2 is not None and file2.filename != "":
+            # 合并模式：file1 + file2
+            image_bytes_list = [file1.read(), file2.read()]
+        elif file is not None and file.filename != "":
+            # 编辑模式：file
+            image_bytes_list = [file.read()]
+        else:
+            return jsonify({"code": 400, "success": False, "url": "", "message": "缺少 file1/file2 或 file 参数"}), 400
+
+        result, code = services.skill_image(instruction, image_bytes_list)
         resp = {
             "code": code,
             "success": result["success"],

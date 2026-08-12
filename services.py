@@ -19,20 +19,22 @@ def validate_image(image_bytes):
     return {"allow": allow}, 200
 
 
-def skill_image(instruction, image_bytes):
+def skill_image(instruction, image_bytes_list):
     """图片编辑/合并：写临时文件 -> 调 agent -> 清理。返回 (result, http_code)。"""
     if ai_core.skill_image_agent is None:
         return {"success": False, "url": "", "message": "Agent 未启用"}, 500
 
-    p = None
+    paths = []
     try:
-        # 将图片临时保存到服务器
+        # 将图片临时保存到服务器（编辑 1 张 / 合并 2 张）
         tmp_dir = tempfile.gettempdir()
-        p = os.path.join(tmp_dir, f"aiwear_{uuid.uuid4().hex}.bin")
-        with open(p, "wb") as f:
-            f.write(image_bytes)
+        for image_bytes in image_bytes_list:
+            p = os.path.join(tmp_dir, f"aiwear_{uuid.uuid4().hex}.bin")
+            with open(p, "wb") as f:
+                f.write(image_bytes)
+            paths.append(p)
 
-        result = ai_core.invoke_agent(instruction, p)
+        result = ai_core.invoke_agent(instruction, paths)
         ok = result.get("success") in (True, "true", "True")
         return {
             "success": ok,
@@ -43,5 +45,6 @@ def skill_image(instruction, image_bytes):
         print(f"处理图片失败: {e}")
         return {"success": False, "url": "", "message": str(e)}, 500
     finally:
-        if p and os.path.exists(p):
-            os.unlink(p)
+        for p in paths:
+            if os.path.exists(p):
+                os.unlink(p)
