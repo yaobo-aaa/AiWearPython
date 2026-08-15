@@ -8,6 +8,7 @@
 |------|----------|----------|
 | 1 | `POST /api/validate-image` | 图片上传前审核 |
 | 2 | `POST /api/skill/image` | 图片编辑与合并 |
+| 3 | `POST /api/upload-image` | 图片上传向量化（qwen 描述 + CLIP 512 维向量 + Redis 存储） |
 
 ---
 
@@ -130,5 +131,80 @@
 >   "success": false,
 >   "url": "",
 >   "message": "缺少 instruction 参数"
+> }
+> ```
+
+---
+
+## 三、图片上传向量化
+
+### 基本信息
+
+| 项目 | 内容 |
+|------|------|
+| 接口地址 | `POST /api/upload-image` |
+| 接口描述 | Java 后端图片入库时调用：Python 服务下载 OSS 图片 → qwen 视觉模型生成文字描述 → CLIP 提取 512 维向量 → 全部信息存入 Redis，供后续检索/推荐使用 |
+| 请求头 | `Content-Type: application/json` 或 `multipart/form-data` |
+
+### 请求参数
+
+| 字段名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| `ossUrl` | string | 是 | 图片在 OSS 上的访问地址（http/https） |
+| `userId` | string | 是 | 所属用户 ID |
+
+参数可通过 JSON body 或 form 任意一种方式传递（JSON 示例见下）。
+
+### 处理流程
+
+1. 下载 `ossUrl` 图片（scheme 校验 / 10MB 体积上限 / 超时）
+2. 用 langchain + `qwen-vl-max` 生成图片文字描述（一句话 + 换行 + 中文逗号关键词）
+3. 用 CLIP 模型（本地 `clip-vit-base-patch16`）提取 512 维向量（L2 归一化）
+4. 生成 `imageId`（uuid hex），把信息写入 Redis
+5. 返回描述、向量维度、imageId
+
+### Redis key 约定（database 0，与 Java 端共用）
+
+| Key | 类型 | 说明 |
+|-----|------|------|
+| `aiwear:image:{imageId}` | Hash | `user_id` / `oss_url` / `description`（含 `\n` 的完整描述） / `keywords` / `embedding`（JSON float 数组） / `embedding_dim` / `created_at` |
+| `aiwear:user:{userId}:images` | Set | 该用户上传的所有 `imageId` |
+
+> 注意：embedding 字段为 512 个小数（round 到 6 位）的 JSON 数组，Java 端 `JSON.parse` 直接读取；无过期时间。
+
+### 请求示例（JSON）
+
+```bash
+curl -X POST http://127.0.0.1:5000/api/upload-image \
+  -H "Content-Type: application/json" \
+  -d '{"ossUrl": "https://your-bucket.oss-cn-hangzhou.aliyuncs.com/path/to.jpg", "userId": "1001"}'
+```
+
+### 响应示例
+
+```json
+{
+  "description": "一件红色的短袖T恤平铺在灰色背景上。\n红色，T恤，短袖，平铺，灰色背景",
+  "embeddingDim": 512,
+  "imageId": "0fd1dbfa39734ba4bec65e26ec9ecfa1",
+  "success": true
+}
+```
+
+### 字段说明
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `description` | string | 图片文字描述：一句话概括 + 换行 + 逗号分隔的关键词 |
+| `embeddingDim` | int | 向量维度，恒为 `512` |
+| `imageId` | string | 图片唯一 ID（uuid hex），即 Redis key 的标识 |
+| `success` | bool | 是否成功 |
+
+> 失败示例（如参数缺失、图片下载失败、模型或 Redis 异常）：
+>
+> ```json
+> {
+>   "success": false,
+>   "message": "缺少 ossUrl, userId 参数"
 > }
 > ```

@@ -44,6 +44,43 @@ def describe_image(image_bytes: bytes, mime: str = "image/jpeg") -> str:
     return "".join(item.get("text", "") for item in content if isinstance(item, dict))
 
 
+def describe_image_lc(image_bytes: bytes, mime: str = "image/jpeg") -> str:
+    """用 langchain + qwen-vl-max 生成图片文字描述（一句话 + 换行 + 中文逗号关键词）。
+
+    qwen-vl-max 在 ChatTongyi 中 client 是 MultiModalConversation，消息 content 原样透传，
+    所以多模态消息要直接构造 DashScope 原生格式 [{"image": ..., "text": ...}]。
+    """
+    data_url = build_data_url(image_bytes, mime)
+    # 注意：ChatTongyi 的 temperature 是假参数（pydantic 静默丢弃），必须走 model_kwargs
+    llm = ChatTongyi(
+        model="qwen-vl-max",
+        api_key=dashscope.api_key,
+        model_kwargs={"temperature": 0.3},
+    )
+
+    system = SystemMessage(
+        content=(
+            "你是一名图片描述专家。用一句话（不超过30字）概括图片主要内容，"
+            "另起一行用中文逗号分隔列出3-6个关键词。"
+            "输出格式严格为：一句话描述\n关键词1，关键词2，关键词3。不要输出任何其它内容。"
+        )
+    )
+    human = HumanMessage(
+        content=[
+            {"image": data_url},
+            {"text": "请描述这张图片"},
+        ]
+    )
+
+    resp = llm.invoke([system, human])
+    print(f"qwen-vl-max langchain 描述响应: {resp}")
+
+    content = resp.content
+    if isinstance(content, str):
+        return content
+    return "".join(item.get("text", "") for item in content if isinstance(item, dict))
+
+
 def judge_image(description: str) -> bool:
     llm = ChatTongyi(
         model="qwen-plus",

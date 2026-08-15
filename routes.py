@@ -54,3 +54,25 @@ def skill_image_api():
         return jsonify(resp), code
     except Exception as e:
         return jsonify({"code": 500, "success": False, "url": "", "message": str(e)}), 500
+
+
+@bp.route("/api/upload-image", methods=["POST"])
+def upload_image_api():
+    try:
+        # 兼容 Java 端两种调用方式：JSON body 或 form 参数
+        data = request.get_json(silent=True) or {}
+        oss_url = data.get("ossUrl") or request.form.get("ossUrl")
+        user_id = data.get("userId") or request.form.get("userId")
+
+        missing = []
+        if not oss_url:
+            missing.append("ossUrl")
+        if not user_id:
+            missing.append("userId")
+        if missing:
+            return jsonify({"success": False, "message": f"缺少 {', '.join(missing)} 参数"}), 400
+
+        result, code = services.upload_image(oss_url, user_id)
+        return jsonify(result), code
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
