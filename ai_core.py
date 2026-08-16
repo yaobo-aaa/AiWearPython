@@ -1,7 +1,9 @@
 import json
 import re
+import time
 
 import dashscope
+import requests
 from dashscope import MultiModalConversation
 from langchain.agents import create_agent
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -18,6 +20,20 @@ from rich import print as rprint
 dashscope.api_key = config.DASHSCOPE_API_KEY
 
 
+def _retry_on_transient(fn, attempts=3, base_delay=1.0, desc="DashScope 调用"):
+    """对网络瞬断/超时自动重试；非网络类异常（如 4xx/业务错误）直接抛出。"""
+    for i in range(1, attempts + 1):
+        try:
+            return fn()
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, ConnectionError) as e:
+            if i == attempts:
+                print(f"{desc} 重试 {attempts} 次仍失败: {e!r}")
+                raise
+            delay = base_delay * (2 ** (i - 1))
+            print(f"{desc} 失败(第{i}次): {e!r}，{delay:.1f}s 后重试")
+            time.sleep(delay)
+
+
 def describe_image(image_bytes: bytes, mime: str = "image/jpeg") -> str:
     data_url = build_data_url(image_bytes, mime)
 
@@ -31,10 +47,13 @@ def describe_image(image_bytes: bytes, mime: str = "image/jpeg") -> str:
         }
     ]
 
-    response = MultiModalConversation.call(
-        model="qwen-vl-max",
-        api_key=dashscope.api_key,
-        messages=messages
+    response = _retry_on_transient(
+        lambda: MultiModalConversation.call(
+            model="qwen-vl-max",
+            api_key=dashscope.api_key,
+            messages=messages
+        ),
+        desc="qwen-vl-max 图片描述",
     )
     print(f"图片描述响应: {response}")
 
@@ -72,7 +91,10 @@ def describe_image_lc(image_bytes: bytes, mime: str = "image/jpeg") -> str:
         ]
     )
 
-    resp = llm.invoke([system, human])
+    resp = _retry_on_transient(
+        lambda: llm.invoke([system, human]),
+        desc="qwen-vl-max 图片描述(langchain)",
+    )
     print(f"qwen-vl-max langchain 描述响应: {resp}")
 
     content = resp.content
@@ -97,12 +119,49 @@ def judge_image(description: str) -> bool:
     )
     human = HumanMessage(content=f"图片描述：{description}")
 
-    resp = llm.invoke([system, human])
+    resp = _retry_on_transient(
+        lambda: llm.invoke([system, human]),
+        desc="qwen-plus 图片审核",
+    )
     print(f"图片审核响应: {resp}")
     match = re.search(r'"allow"\s*:\s*(true|false)', resp.content)
     if not match:
         raise ValueError(f"无法解析审核结果: {resp.content}")
     return match.group(1) == "true"
+
+
+def expand_search_query(query: str) -> list:
+    """检索词扩展：把 query 扩成语义相关的关键词/同义词列表（文搜图用）。
+
+    qwen-plus 一次生成、逗号分隔，覆盖同义词/近义词/上下位词及颜色、款式、风格、
+    人群等属性词，并保证包含原词。输出需与 qwen 生成的图片关键词风格一致，
+    才能命中库里的文本描述。失败/解析异常时回退为 [query]，不影响检索。
+
+    注意：ChatTongyi 不支持 response_format，只要求纯文本逗号分隔输出。
+    """
+    llm = ChatTongyi(
+        model="qwen-plus",
+        api_key=dashscope.api_key,
+        model_kwargs={"temperature": 0.2},
+    )
+    system = SystemMessage(
+        content=(
+            "你是服装穿搭图片检索助手。用户输入一段检索词，"
+            "请扩展出 5-10 个语义相关的中文检索关键词，必须包含原词，"
+            "覆盖同义词、近义词、上下位词，以及颜色/款式/风格/人群等常见属性词。"
+            "只输出用中文逗号分隔的关键词列表，不要编号、不要任何其它内容。"
+        )
+    )
+    human = HumanMessage(content=f"检索词：{query}")
+    resp = _retry_on_transient(
+        lambda: llm.invoke([system, human]),
+        desc="qwen-plus 检索词扩展",
+    )
+    print(f"检索词扩展响应: {resp.content}")
+    terms = [t.strip() for t in re.split(r"[,，、;；]+", resp.content or "") if t.strip()]
+    if query not in terms:
+        terms.insert(0, query)
+    return terms
 
 
 @tool(parse_docstring=True)

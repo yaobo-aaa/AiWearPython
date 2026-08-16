@@ -9,6 +9,7 @@
 | 1 | `POST /api/validate-image` | 图片上传前审核 |
 | 2 | `POST /api/skill/image` | 图片编辑与合并 |
 | 3 | `POST /api/upload-image` | 图片上传向量化（qwen 描述 + CLIP 512 维向量 + Redis 存储） |
+| 4 | `POST /api/search-image` | 图库检索：文搜图（文本描述） / 图搜图（上传图片） |
 
 ---
 
@@ -208,3 +209,103 @@ curl -X POST http://127.0.0.1:5000/api/upload-image \
 >   "message": "缺少 ossUrl, userId 参数"
 > }
 > ```
+
+---
+
+## 四、图片检索（文搜图 / 图搜图）
+
+### 基本信息
+
+| 项目 | 内容 |
+|------|------|
+| 接口地址 | `POST /api/search-image` |
+| 接口描述 | 用于检索相似图片，支持两种方式：文搜图（根据文本描述搜索相似图片）、图搜图（上传一张图片，根据该图片搜索相似图片） |
+| 请求头 | `Content-Type: multipart/form-data` |
+
+### 请求参数
+
+| 字段名 | 类型 | 必填 | 说明 |
+|--------|------|------|------|
+| `userId` | Long | 是 | 用户 ID |
+| `file` | file | 否 | 查询图片（图搜图） |
+| `query` | string | 否 | 文本查询（文搜图） |
+
+> `file` 与 `query` 至少传一个；两者都传时按**图搜图**处理。
+
+### 处理流程
+
+1. 校验 `userId` 与查询条件（`file`/`query` 至少一个）
+2. 从 Redis 读取该用户的全部图片 ID：`SMEMBERS aiwear:user:{userId}:images`
+3. 逐个读取图片哈希 `HGETALL aiwear:image:{imageId}`，取 `description` / `keywords` / `embedding`
+4. **图搜图**：CLIP 提取查询图片 512 维向量（L2 归一化），与库内图片向量点积即余弦相似度
+5. **文搜图**：先用 qwen-plus 对 `query` 做语义扩展（同义词/属性词，如 `男人`→`男性`），再与存储的文本描述做中文文本相似度比对（关键词命中率 + 字符 bigram Dice）
+6. 按各自阈值过滤、相似度降序返回
+
+### 响应示例
+
+```json
+{
+  "code": 200,
+  "message": "查询成功",
+  "data": [
+    {
+      "filePath": "https://bite-lz.oss-cn-beijing.aliyuncs.com/images/0ec1333db31b4bddbd7f1fda8c90ab0b.jpg",
+      "similarity": 0.2162
+    }
+  ]
+}
+```
+
+### 字段说明
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `code` | int | 业务状态码，`200` 成功 / `400` 参数错误 / `500` 服务异常 |
+| `message` | string | 结果说明，成功为 `查询成功` |
+| `data` | array | 命中的图片列表，按相似度降序；空库或无命中为空数组 `[]` |
+| `data[].filePath` | string | 图片 OSS 地址 |
+| `data[].similarity` | float | 相似度（0~1，保留 4 位小数） |
+
+### 检索与阈值说明
+
+- **图搜图**：CLIP 向量余弦相似度，阈值 `IMAGE_SEARCH_THRESHOLD = 0.50`（`services.py`；实测同图≈1.0，不同图之间 0.48~0.56）
+- **文搜图**：qwen-plus 语义扩展 query 后做中文文本相似度（关键词命中率 + 字符 bigram Dice），阈值 `TEXT_SEARCH_THRESHOLD = 0.10`（`services.py`；实测正确命中 ≥0.167，误报 ≤0.053）
+- **检索词扩展**：每次文搜图会额外调用一次 qwen-plus（约 1~2s），用于解决同义词问题（如 `男人` 命中描述中的 `青年男性`）；扩展失败自动回退为原词，不影响检索
+- 两套相似度数值域不同（文本相似度 vs CLIP 余弦），阈值不可直接对比；以上为实测数据调优后的默认值，可随数据量调整
+- 单次最多返回 `MAX_SEARCH_RESULTS = 20` 条
+
+### 请求示例
+
+文搜图：
+
+```bash
+curl -X POST http://127.0.0.1:5000/api/search-image \
+  -F "userId=1001" \
+  -F "query=红色T恤"
+```
+
+图搜图：
+
+```bash
+curl -X POST http://127.0.0.1:5000/api/search-image \
+  -F "userId=1001" \
+  -F "file=@/path/to/query.jpg"
+```
+
+### 失败示例
+
+```json
+{
+  "code": 400,
+  "message": "缺少 userId 参数",
+  "data": []
+}
+```
+
+```json
+{
+  "code": 400,
+  "message": "缺少查询条件：file 与 query 至少传一个",
+  "data": []
+}
+```

@@ -76,3 +76,24 @@ def upload_image_api():
         return jsonify(result), code
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 500
+
+
+@bp.route("/api/search-image", methods=["POST"])
+def search_image_api():
+    """图库检索：文搜图（query）或图搜图（file），返回按相似度降序的 OSS 地址列表。"""
+    try:
+        user_id = request.form.get("userId")
+        if not user_id:
+            return jsonify({"code": 400, "message": "缺少 userId 参数", "data": []}), 400
+
+        query = request.form.get("query")
+        file = request.files.get("file")
+        image_bytes = file.read() if file is not None and file.filename != "" else None
+
+        data, code, message = services.search_image(user_id, query, image_bytes)
+        if data is None:
+            return jsonify({"code": code, "message": message, "data": []}), code
+        return jsonify({"code": code, "message": message, "data": data}), code
+    except Exception as e:
+        print(f"search-image 处理失败: {e}")
+        return jsonify({"code": 500, "message": str(e), "data": []}), 500

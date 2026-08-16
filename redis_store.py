@@ -12,6 +12,7 @@ _redis_client = redis.Redis(
     host=config.REDIS_HOST,
     port=config.REDIS_PORT,
     db=config.REDIS_DB,
+    password=config.REDIS_PASSWORD or None,
     socket_timeout=config.REDIS_TIMEOUT,
     socket_connect_timeout=config.REDIS_TIMEOUT,
     decode_responses=True,
@@ -59,3 +60,20 @@ def save_image_meta(image_id, user_id, oss_url, description, keywords, embedding
     pipe.hset(_image_key(image_id), mapping=mapping)
     pipe.sadd(_user_images_key(user_id), image_id)
     pipe.execute()
+
+
+def get_user_image_ids(user_id) -> list:
+    """读取用户全部图片 ID（Set -> list）。用户无图时返回空列表。"""
+    return sorted(_redis_client.smembers(_user_images_key(user_id)) or [])
+
+
+def get_image_meta(image_id: str) -> dict | None:
+    """读取单张图片哈希，embedding 字段反序列化为 float 列表。key 不存在返回 None。"""
+    meta = _redis_client.hgetall(_image_key(image_id))
+    if not meta:
+        return None
+    meta = dict(meta)
+    embedding_raw = meta.get("embedding")
+    if embedding_raw:
+        meta["embedding"] = json.loads(embedding_raw)
+    return meta
